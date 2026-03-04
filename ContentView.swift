@@ -1,29 +1,22 @@
-#if canImport(SwiftUI)
 import SwiftUI
-
-#if canImport(AVFoundation)
 import AVFoundation
-#endif
-
-#if canImport(VisionKit)
 import VisionKit
-#endif
 
 // MARK: - Models
-struct Product: Identifiable {
+struct Product: Identifiable, Equatable {
     let id = UUID()
     let name: String
     let brand: String
     let barcode: String
 }
 
-enum StockStatus: String {
+enum StockStatus: String, CaseIterable {
     case inStock = "in-stock"
     case lowStock = "low-stock"
     case outOfStock = "out-of-stock"
 }
 
-struct Price: Identifiable {
+struct Price: Identifiable, Equatable {
     let id = UUID()
     let retailer: String
     let price: Double
@@ -35,6 +28,8 @@ struct Price: Identifiable {
 // MARK: - Product Database
 final class ProductDatabase {
     static let shared = ProductDatabase()
+
+    private init() {}
 
     private let products: [String: Product] = [
         "012000161551": Product(name: "Coca-Cola Classic 12oz Can (12 Pack)", brand: "Coca-Cola", barcode: "012000161551"),
@@ -51,9 +46,11 @@ final class ProductDatabase {
         )
     }
 
+    /// Deterministic mock pricing based on barcode so repeated lookups are stable.
     func generatePrices(for barcode: String) -> [Price] {
         let product = getProduct(barcode: barcode)
-        let basePrice = Double.random(in: 5...25)
+        let seed = Self.seed(from: barcode)
+        let basePrice = 4.99 + Double(seed % 2000) / 100.0 // 4.99 ... 24.99
 
         let retailers: [(name: String, distance: Double, multiplier: Double, urlPrefix: String)] = [
             ("Target", 1.2, 0.95, "https://www.target.com/s?searchTerm="),
@@ -63,29 +60,35 @@ final class ProductDatabase {
             ("CVS", 0.5, 1.08, "https://www.cvs.com/search?searchTerm=")
         ]
 
-        func randomStock() -> StockStatus {
-            let random = Double.random(in: 0...1)
-            if random < 0.15 { return .outOfStock }
-            if random < 0.35 { return .lowStock }
-            return .inStock
-        }
-
-        return retailers.map { retailer in
+        return retailers.enumerated().map { idx, retailer in
             let encoded = product.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+            let stock = Self.stockStatus(seed: seed, index: idx)
             return Price(
                 retailer: retailer.name,
-                price: basePrice * retailer.multiplier,
+                price: (basePrice * retailer.multiplier * 100).rounded() / 100,
                 distance: retailer.distance,
-                stock: randomStock(),
+                stock: stock,
                 url: "\(retailer.urlPrefix)\(encoded)"
             )
         }
         .sorted { $0.price < $1.price }
     }
+
+    private static func seed(from text: String) -> Int {
+        text.unicodeScalars.reduce(0) { ($0 * 31 + Int($1.value)) % 10_000 }
+    }
+
+    private static func stockStatus(seed: Int, index: Int) -> StockStatus {
+        let value = (seed + index * 17) % 100
+        switch value {
+        case 0..<15: return .outOfStock
+        case 15..<35: return .lowStock
+        default: return .inStock
+        }
+    }
 }
 
-#if canImport(VisionKit) && os(iOS)
-// MARK: - VisionKit DataScanner (iOS 16+)
+// MARK: - VisionKit Scanner Wrapper (iOS 16+)
 @available(iOS 16.0, *)
 struct DataScannerView: UIViewControllerRepresentable {
     typealias UIViewControllerType = DataScannerViewController
@@ -165,7 +168,6 @@ struct DataScannerView: UIViewControllerRepresentable {
         }
     }
 }
-#endif
 
 // MARK: - Main Content View
 struct ContentView: View {
@@ -175,16 +177,15 @@ struct ContentView: View {
     @State private var product: Product?
     @State private var prices: [Price] = []
     @State private var isLoading = false
+    @State private var lookupTask: Task<Void, Never>?
 
     @State private var showError = false
     @State private var errorMessage = ""
 
     private var isScannerSupported: Bool {
-        #if canImport(VisionKit) && os(iOS)
         if #available(iOS 16.0, *) {
             return DataScannerViewController.isSupported && DataScannerViewController.isAvailable
         }
-        #endif
         return false
     }
 
@@ -216,7 +217,7 @@ struct ContentView: View {
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
-            .onChange(of: scannedCode) { newValue in
+            .onChange(of: scannedCode) { _, newValue in
                 if let code = newValue {
                     lookupBarcode(code)
                 }
@@ -229,10 +230,13 @@ struct ContentView: View {
             .sheet(isPresented: $showingScanner) {
                 scannerSheet
             }
+            .onDisappear {
+                lookupTask?.cancel()
+            }
         }
     }
 
-    // MARK: - UI Pieces
+    // MARK: - UI
     private var header: some View {
         VStack(spacing: 8) {
             Text("PriceScan")
@@ -271,7 +275,7 @@ struct ContentView: View {
 
                     Text(isScannerSupported
                          ? "Tap Start Scanner to scan a barcode"
-                         : "Requires iOS 16+ and a compatible device")
+                         : "Requires iOS 16+ and compatible hardware")
                         .font(.subheadline)
                         .foregroundColor(.gray)
                 }
@@ -348,7 +352,6 @@ struct ContentView: View {
 
     @ViewBuilder
     private var scannerSheet: some View {
-        #if canImport(VisionKit) && os(iOS)
         if #available(iOS 16.0, *) {
             ZStack {
                 Color.black.ignoresSafeArea()
@@ -390,11 +393,8 @@ struct ContentView: View {
             .presentationDetents([.large])
         } else {
             Text("Scanner requires iOS 16+")
+                .padding()
         }
-        #else
-        Text("Scanner is unavailable on this platform")
-            .padding()
-        #endif
     }
 
     private func resultsSection(product: Product) -> some View {
@@ -435,7 +435,6 @@ struct ContentView: View {
             return
         }
 
-        #if canImport(AVFoundation)
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             showingScanner = true
@@ -457,23 +456,22 @@ struct ContentView: View {
             errorMessage = "Unknown camera authorization state."
             showError = true
         }
-        #else
-        errorMessage = "Camera APIs are unavailable on this platform."
-        showError = true
-        #endif
     }
 
     private func lookupManualCode() {
-        let trimmed = manualCode.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        lookupBarcode(trimmed)
+        let sanitized = manualCode.filter { $0.isNumber }
+        guard !sanitized.isEmpty else { return }
+        lookupBarcode(sanitized)
         manualCode = ""
     }
 
     private func lookupBarcode(_ code: String) {
+        lookupTask?.cancel()
         isLoading = true
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 900_000_000)
+
+        lookupTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
             product = ProductDatabase.shared.getProduct(barcode: code)
             prices = ProductDatabase.shared.generatePrices(for: code)
             isLoading = false
@@ -662,9 +660,6 @@ extension Color {
 }
 
 // MARK: - Preview
-struct ContentView_Previews: PreviewProvider {
-    static var previews: some View {
-        ContentView()
-    }
+#Preview {
+    ContentView()
 }
-#endif
