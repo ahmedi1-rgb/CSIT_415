@@ -1,6 +1,13 @@
+#if canImport(SwiftUI)
 import SwiftUI
-import VisionKit
+
+#if canImport(AVFoundation)
 import AVFoundation
+#endif
+
+#if canImport(VisionKit)
+import VisionKit
+#endif
 
 // MARK: - Models
 struct Product: Identifiable {
@@ -57,26 +64,27 @@ final class ProductDatabase {
         ]
 
         func randomStock() -> StockStatus {
-            let r = Double.random(in: 0...1)
-            if r < 0.15 { return .outOfStock }
-            if r < 0.35 { return .lowStock }
+            let random = Double.random(in: 0...1)
+            if random < 0.15 { return .outOfStock }
+            if random < 0.35 { return .lowStock }
             return .inStock
         }
 
-        return retailers.map { r in
+        return retailers.map { retailer in
             let encoded = product.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
             return Price(
-                retailer: r.name,
-                price: basePrice * r.multiplier,
-                distance: r.distance,
+                retailer: retailer.name,
+                price: basePrice * retailer.multiplier,
+                distance: retailer.distance,
                 stock: randomStock(),
-                url: "\(r.urlPrefix)\(encoded)"
+                url: "\(retailer.urlPrefix)\(encoded)"
             )
         }
         .sorted { $0.price < $1.price }
     }
 }
 
+#if canImport(VisionKit) && os(iOS)
 // MARK: - VisionKit DataScanner (iOS 16+)
 @available(iOS 16.0, *)
 struct DataScannerView: UIViewControllerRepresentable {
@@ -93,15 +101,15 @@ struct DataScannerView: UIViewControllerRepresentable {
     @Binding var errorMessage: String?
 
     func makeUIViewController(context: Context) -> DataScannerViewController {
-        let vc = DataScannerViewController(
+        let controller = DataScannerViewController(
             recognizedDataTypes: recognizedDataTypes,
             qualityLevel: qualityLevel,
             recognizesMultipleItems: recognizesMultipleItems,
             isHighFrameRateTrackingEnabled: isHighFrameRateTrackingEnabled,
             isHighlightingEnabled: isHighlightingEnabled
         )
-        vc.delegate = context.coordinator
-        return vc
+        controller.delegate = context.coordinator
+        return controller
     }
 
     func updateUIViewController(_ uiViewController: DataScannerViewController, context: Context) {
@@ -142,8 +150,8 @@ struct DataScannerView: UIViewControllerRepresentable {
         private func handle(_ item: RecognizedItem) {
             switch item {
             case .barcode(let barcode):
-                if let value = barcode.payloadStringValue, !value.isEmpty {
-                    parent.scannedCode = value
+                if let payload = barcode.payloadStringValue, !payload.isEmpty {
+                    parent.scannedCode = payload
                     parent.isPresented = false
                 }
             default:
@@ -157,6 +165,7 @@ struct DataScannerView: UIViewControllerRepresentable {
         }
     }
 }
+#endif
 
 // MARK: - Main Content View
 struct ContentView: View {
@@ -171,9 +180,11 @@ struct ContentView: View {
     @State private var errorMessage = ""
 
     private var isScannerSupported: Bool {
+        #if canImport(VisionKit) && os(iOS)
         if #available(iOS 16.0, *) {
             return DataScannerViewController.isSupported && DataScannerViewController.isAvailable
         }
+        #endif
         return false
     }
 
@@ -190,7 +201,6 @@ struct ContentView: View {
                 ScrollView {
                     VStack(spacing: 20) {
                         header
-
                         scannerSection
 
                         if isLoading {
@@ -199,67 +209,25 @@ struct ContentView: View {
                                 .padding()
                         }
 
-                        if let product = product {
+                        if let product {
                             resultsSection(product: product)
                         }
                     }
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
-            // iOS 16-compatible single-argument onChange
             .onChange(of: scannedCode) { newValue in
                 if let code = newValue {
                     lookupBarcode(code)
                 }
             }
             .alert("Error", isPresented: $showError) {
-                Button("OK", role: .cancel) { }
+                Button("OK", role: .cancel) {}
             } message: {
                 Text(errorMessage)
             }
             .sheet(isPresented: $showingScanner) {
-                if #available(iOS 16.0, *) {
-                    ZStack {
-                        Color.black.ignoresSafeArea()
-
-                        DataScannerView(
-                            recognizedDataTypes: [
-                                .barcode(symbologies: [.ean8, .ean13, .upce, .code39, .code128, .qr])
-                            ],
-                            qualityLevel: .balanced,
-                            recognizesMultipleItems: false,
-                            isHighFrameRateTrackingEnabled: true,
-                            isHighlightingEnabled: true,
-                            scannedCode: $scannedCode,
-                            isPresented: $showingScanner,
-                            errorMessage: Binding(
-                                get: { nil },
-                                set: { msg in
-                                    if let msg {
-                                        errorMessage = msg
-                                        showError = true
-                                    }
-                                }
-                            )
-                        )
-
-                        VStack {
-                            HStack {
-                                Spacer()
-                                Button {
-                                    showingScanner = false
-                                } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .font(.system(size: 28, weight: .bold))
-                                        .foregroundStyle(.white.opacity(0.9))
-                                        .padding()
-                                }
-                            }
-                            Spacer()
-                        }
-                    }
-                    .presentationDetents([.large])
-                }
+                scannerSheet
             }
         }
     }
@@ -332,7 +300,6 @@ struct ContentView: View {
             .disabled(!isScannerSupported)
             .opacity(isScannerSupported ? 1 : 0.5)
 
-            // Manual Input
             HStack(spacing: 12) {
                 TextField("Enter barcode manually...", text: $manualCode)
                     .textFieldStyle(.plain)
@@ -359,7 +326,6 @@ struct ContentView: View {
                 }
             }
 
-            // Test Barcodes
             VStack(spacing: 16) {
                 Text("🧪 Test Barcodes - Tap to Try")
                     .font(.headline)
@@ -378,6 +344,57 @@ struct ContentView: View {
         .background(Color(hex: "1e293b").opacity(0.6))
         .cornerRadius(24)
         .padding(.horizontal)
+    }
+
+    @ViewBuilder
+    private var scannerSheet: some View {
+        #if canImport(VisionKit) && os(iOS)
+        if #available(iOS 16.0, *) {
+            ZStack {
+                Color.black.ignoresSafeArea()
+
+                DataScannerView(
+                    recognizedDataTypes: [.barcode(symbologies: [.ean8, .ean13, .upce, .code39, .code128, .qr])],
+                    qualityLevel: .balanced,
+                    recognizesMultipleItems: false,
+                    isHighFrameRateTrackingEnabled: true,
+                    isHighlightingEnabled: true,
+                    scannedCode: $scannedCode,
+                    isPresented: $showingScanner,
+                    errorMessage: Binding(
+                        get: { nil },
+                        set: { value in
+                            if let value {
+                                errorMessage = value
+                                showError = true
+                            }
+                        }
+                    )
+                )
+
+                VStack {
+                    HStack {
+                        Spacer()
+                        Button {
+                            showingScanner = false
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 28, weight: .bold))
+                                .foregroundStyle(.white.opacity(0.9))
+                                .padding()
+                        }
+                    }
+                    Spacer()
+                }
+            }
+            .presentationDetents([.large])
+        } else {
+            Text("Scanner requires iOS 16+")
+        }
+        #else
+        Text("Scanner is unavailable on this platform")
+            .padding()
+        #endif
     }
 
     private func resultsSection(product: Product) -> some View {
@@ -418,13 +435,32 @@ struct ContentView: View {
             return
         }
 
+        #if canImport(AVFoundation)
         switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            showingScanner = true
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { granted in
+                DispatchQueue.main.async {
+                    if granted {
+                        showingScanner = true
+                    } else {
+                        errorMessage = "Camera access was not granted."
+                        showError = true
+                    }
+                }
+            }
         case .denied, .restricted:
             errorMessage = "Camera permission is denied. Enable it in Settings to scan."
             showError = true
-        default:
-            showingScanner = true
+        @unknown default:
+            errorMessage = "Unknown camera authorization state."
+            showError = true
         }
+        #else
+        errorMessage = "Camera APIs are unavailable on this platform."
+        showError = true
+        #endif
     }
 
     private func lookupManualCode() {
@@ -566,7 +602,7 @@ struct PriceCard: View {
     }
 
     private var stockPill: some View {
-        let (text, fg, bg, stroke): (String, Color, Color, Color) = {
+        let (text, foreground, background, stroke): (String, Color, Color, Color) = {
             switch price.stock {
             case .inStock:
                 return ("In Stock", Color(hex: "10b981"), Color(hex: "10b981").opacity(0.2), Color(hex: "10b981"))
@@ -580,10 +616,10 @@ struct PriceCard: View {
         return Text(text)
             .font(.caption)
             .fontWeight(.semibold)
-            .foregroundColor(fg)
+            .foregroundColor(foreground)
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(bg)
+            .background(background)
             .cornerRadius(20)
             .overlay(
                 RoundedRectangle(cornerRadius: 20)
@@ -595,20 +631,26 @@ struct PriceCard: View {
 // MARK: - Color Extension
 extension Color {
     init(hex: String) {
-        let hex = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        var int: UInt64 = 0
-        Scanner(string: hex).scanHexInt64(&int)
-        let a, r, g, b: UInt64
-        switch hex.count {
+        let trimmed = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var value: UInt64 = 0
+        Scanner(string: trimmed).scanHexInt64(&value)
+
+        let a: UInt64
+        let r: UInt64
+        let g: UInt64
+        let b: UInt64
+
+        switch trimmed.count {
         case 3:
-            (a, r, g, b) = (255, (int >> 8) * 17, (int >> 4 & 0xF) * 17, (int & 0xF) * 17)
+            (a, r, g, b) = (255, (value >> 8) * 17, (value >> 4 & 0xF) * 17, (value & 0xF) * 17)
         case 6:
-            (a, r, g, b) = (255, int >> 16, int >> 8 & 0xFF, int & 0xFF)
+            (a, r, g, b) = (255, value >> 16, value >> 8 & 0xFF, value & 0xFF)
         case 8:
-            (a, r, g, b) = (int >> 24, int >> 16 & 0xFF, int >> 8 & 0xFF, int & 0xFF)
+            (a, r, g, b) = (value >> 24, value >> 16 & 0xFF, value >> 8 & 0xFF, value & 0xFF)
         default:
             (a, r, g, b) = (255, 255, 255, 0)
         }
+
         self.init(
             .sRGB,
             red: Double(r) / 255,
@@ -625,3 +667,4 @@ struct ContentView_Previews: PreviewProvider {
         ContentView()
     }
 }
+#endif
